@@ -8,6 +8,7 @@ import sys.io.FileInput;
 
 /**
  * https://github.com/kunklejr/node-pcap-parser/blob/master/lib/pcap-parser.js
+ * https://wiki.wireshark.org/Development/PcapNg?action=AttachFile&do=view&target=ntartest.c
  * @author tecteun
  */
 enum Endianness {
