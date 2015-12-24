@@ -47,8 +47,9 @@ class NekoSocketServer extends ThreadServer<Client, Message>
   }
 
   private var socksVersion:Int = 5;
-  override function readClientMessage(c:Client, buf:Bytes, pos:Int, len:Int)
+  override function readClientMessage(c:Client, buffer:Bytes, pos:Int, len:Int)
   {
+	var buf = buffer.sub(pos, len);
     // find out if there's a full message, and if so, how long it is.
     var protocol:Int = buf.get(0);
 	
