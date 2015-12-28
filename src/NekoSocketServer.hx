@@ -1,6 +1,9 @@
 // ServerExample.hx
 package ;
 import haxe.io.Bytes;
+import haxe.io.BytesBuffer;
+import haxe.io.BytesInput;
+import haxe.io.BytesOutput;
 import neko.Lib;
 import neko.net.ThreadServer;
 import sys.net.Socket;
@@ -12,6 +15,7 @@ typedef Client = {
   var id : String;
   var socket:Socket;
   var state:STATE;
+  var buffer:BytesOutput;
 }
 
 typedef Message = {
@@ -45,7 +49,7 @@ class NekoSocketServer extends ThreadServer<Client, Message>
 		#if debug
 			Lib.println("client " + id + " is " + s.peer());
 		#end
-		return { socket: s, id: id, state:STATE.handshake };
+		return { socket: s, id: id, state:STATE.handshake, buffer: new BytesOutput() };
 	}
 
 	override function clientDisconnected( c : Client )
@@ -60,37 +64,7 @@ class NekoSocketServer extends ThreadServer<Client, Message>
 	{
 		var buf = buffer.sub(pos, len);
 		// find out if there's a full message, and if so, how long it is.
-
-		if(c.state == STATE.handshake){
-			var protocol:Int = buf.get(0);
-
-			trace('Client Connect - Socks protocol v$protocol');
-			if (protocol != socksVersion) {
-				c.socket.close();
-			}
-			var nMethods = buf.get(1);
-			trace('$nMethods encryption method');
-			if (buf.length < nMethods + 2) { };//return;
-			for(i in 0...nMethods) {
-				// try to find the no-auth method type, and if found, choose it
-				trace(buf.get(i + 2) == 0);
-				if(buf.get(i+2) == 0) {
-					c.socket.output.writeByte(0x05);
-					c.socket.output.writeByte(0x00);
-					c.socket.output.flush();
-				if (buf.length > nMethods + 2) {
-					var newChunk = buf.sub(nMethods + 2, buf.length - (nMethods + 2));
-					trace(newChunk.length);
-					return null;// { msg: { str: newChunk.toString(), bytes:newChunk }, bytes: newChunk.length };
-				}else {
-				}
-				// return;
-			}
-		}
-	}
-
-
-	return null;
+		return { msg: { str: buf.toString(), bytes:buf }, bytes: buf.length };
 	}
 
 	override function clientMessage( c : Client, msg : Message )
@@ -102,7 +76,20 @@ class NekoSocketServer extends ThreadServer<Client, Message>
 	}
 
 	public dynamic function onMessage( c : Client, msg : Message  ) {
-		var buffer = msg.bytes;
+		switch(c.state) {
+			case STATE.handshake	:	handleConnection(c, msg);
+			case STATE.request		:	handleRequest(c, msg);
+			case STATE.forwarding	: null;
+			
+		}
+	}
+	
+	private function handleRequest(c:Client, msg:Message):Void {
+		trace(msg.bytes + " " + msg.bytes.length);
+		c.buffer.write(msg.bytes);
+		var buffer = c.buffer.getBytes();
+		if (buffer.length < 4) { return; };
+		
 		var protocol:Int =  buffer.get(0);
 
 		if (protocol != socksVersion) {
@@ -110,9 +97,9 @@ class NekoSocketServer extends ThreadServer<Client, Message>
 		}
 
 		var cmd = buffer.get(1);
-
 		if(cmd != 0x01) {
 			trace('unsupported command: $cmd');
+			trace(buffer.toString());
 			c.socket.output.writeByte(0x05);
 			c.socket.output.writeByte(0x01);
 			c.socket.output.flush();
@@ -149,6 +136,39 @@ class NekoSocketServer extends ThreadServer<Client, Message>
 
 
 		//throw "Unhandled data '"+msg+"'";
+	}
+	
+	private function handleConnection(c:Client, msg:Message):Void {
+		c.buffer.writeBytes(msg.bytes, 0, msg.bytes.length);
+
+		var buf = c.buffer.getBytes();
+		var protocol:Int = buf.get(0);
+
+		trace('Client Connect - Socks protocol v$protocol');
+		if (protocol != socksVersion) {
+			c.socket.close();
+		}
+		var nMethods = buf.get(1);
+		trace('$nMethods encryption method');
+		if (buf.length < nMethods + 2) { };//return;
+		for(i in 0...nMethods) {
+			// try to find the no-auth method type, and if found, choose it
+			trace(buf.get(i + 2) == 0);
+			if(buf.get(i+2) == 0) {
+				c.socket.output.writeByte(0x05);
+				c.socket.output.writeByte(0x00);
+				c.socket.output.flush();
+				c.state = STATE.request;
+				if (buf.length > nMethods + 2) {
+					var newChunk = buf.sub(nMethods + 2, buf.length - (nMethods + 2));
+					trace(newChunk.length);
+					//handlemessage
+					return null;// { msg: { str: newChunk.toString(), bytes:newChunk }, bytes: newChunk.length };
+				}else {
+				}
+			}
+		}
+		
 	}
 
 	public override function addSocket( s : Socket ) {
