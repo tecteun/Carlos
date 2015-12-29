@@ -4,6 +4,7 @@ import haxe.io.Bytes;
 import haxe.io.BytesBuffer;
 import haxe.io.BytesInput;
 import haxe.io.BytesOutput;
+import haxe.Utf8;
 import neko.Lib;
 import neko.net.ThreadServer;
 import sys.net.Socket;
@@ -15,7 +16,7 @@ typedef Client = {
   var id : String;
   var socket:Socket;
   var state:STATE;
-  var buffer:BytesOutput;
+  var buffer:BytesBuffer;
 }
 
 typedef Message = {
@@ -49,7 +50,7 @@ class NekoSocketServer extends ThreadServer<Client, Message>
 		#if debug
 			Lib.println("client " + id + " is " + s.peer());
 		#end
-		return { socket: s, id: id, state:STATE.handshake, buffer: new BytesOutput() };
+		return { socket: s, id: id, state:STATE.handshake, buffer: new BytesBuffer() };
 	}
 
 	override function clientDisconnected( c : Client )
@@ -62,9 +63,25 @@ class NekoSocketServer extends ThreadServer<Client, Message>
 	private var socksVersion:Int = 5;
 	override function readClientMessage(c:Client, buffer:Bytes, pos:Int, len:Int)
 	{
-		var buf = buffer.sub(pos, len);
-		// find out if there's a full message, and if so, how long it is.
-		return { msg: { str: buf.toString(), bytes:buf }, bytes: buf.length };
+		c.buffer.add(buffer.sub(pos, len));
+		Lib.println("buf " + c.buffer.length);
+		Lib.println(pos);
+		Lib.println(len);
+		Lib.println(c.buffer);
+		
+		var retval:Message = null;
+		switch(c.state) {
+			case STATE.handshake	:	retval = handleConnection(c);
+			case STATE.request		:	retval = handleRequest(c);
+			case STATE.forwarding	: null;
+			
+		}
+		if (retval != null) {
+			c.buffer = new BytesBuffer();
+			trace("full message");
+			return { msg: retval, bytes: retval.bytes.length };
+		}
+		return null;
 	}
 
 	override function clientMessage( c : Client, msg : Message )
@@ -76,19 +93,20 @@ class NekoSocketServer extends ThreadServer<Client, Message>
 	}
 
 	public dynamic function onMessage( c : Client, msg : Message  ) {
-		switch(c.state) {
-			case STATE.handshake	:	handleConnection(c, msg);
-			case STATE.request		:	handleRequest(c, msg);
-			case STATE.forwarding	: null;
-			
-		}
+		
 	}
 	
-	private function handleRequest(c:Client, msg:Message):Void {
-		trace(msg.bytes + " " + msg.bytes.length);
-		c.buffer.write(msg.bytes);
-		var buffer = c.buffer.getBytes();
-		if (buffer.length < 4) { return; };
+	private function expandAndCopy(c:Client, ?buffer:Bytes = null):Bytes {
+		var retval = buffer != null ? buffer : c.buffer.getBytes();
+		c.buffer = new BytesBuffer();
+		c.buffer.add(retval);
+		return retval;
+	}
+	
+	private function handleRequest(c:Client):Message {
+		
+		var buffer = expandAndCopy(c);
+		if (buffer.length < 4) { return null; };
 		
 		var protocol:Int =  buffer.get(0);
 
@@ -100,19 +118,20 @@ class NekoSocketServer extends ThreadServer<Client, Message>
 		if(cmd != 0x01) {
 			trace('unsupported command: $cmd');
 			trace(buffer.toString());
+			
 			c.socket.output.writeByte(0x05);
 			c.socket.output.writeByte(0x01);
 			c.socket.output.flush();
 			c.socket.close();
-			return;
+			return null;
 		}
 		var addressType:Int = buffer.get(3)
-		, host:String
-		, port
+		, host:String = "undefined"
+		, port:Int = -1
 		, responseBuf;
 
 		if(addressType == 0x01) { // ipv4
-			if (buffer.length < 10) { return;} // 4 for host + 2 for port
+			if (buffer.length < 10) { return null; }; // 4 for host + 2 for port
 			host = '${buffer.get(4)}.${buffer.get(5)}.${buffer.get(6)}.${buffer.get(7)}';
 			port = buffer.getUInt16(8);
 			responseBuf = Bytes.alloc(10);
@@ -120,8 +139,19 @@ class NekoSocketServer extends ThreadServer<Client, Message>
 			buffer = buffer.sub(10, buffer.length - 10);
 			trace('host $host');
 		}
-		else if(addressType == 0x03) { // dns
+		else if (addressType == 0x03) { // dns
+			if (buffer.length < 5) { trace("no length ");  return null; };// if no length present yet
+			var addrLength = buffer.get(4);
+			if (buffer.length < 5 + addrLength + 2) { trace("no hostprt");  return null; };// host + port
+			host = Utf8.decode(buffer.getString(5, addrLength));
+			var bi = new BytesInput(buffer, 5 + addrLength, 2);
+			bi.bigEndian = true;			
+			port = bi.readUInt16();
+			responseBuf = Bytes.alloc(5 + addrLength + 2);
+			responseBuf.blit(0, buffer, 0, 5 + addrLength + 2);
 
+			buffer = buffer.sub(responseBuf.length, buffer.length - responseBuf.length );
+			
 		}
 		else if(addressType == 0x04) { // ipv6
 
@@ -129,19 +159,17 @@ class NekoSocketServer extends ThreadServer<Client, Message>
 			trace('unsupported address type: $addressType');
 			c.socket.output.writeByte(0x05);
 			c.socket.output.writeByte(0x01);
-			c.socket.output.flush();
-			c.socket.close();
-			return;
+			//c.socket.output.flush();
+			//c.socket.close();
+			return null;
 		}
-
-
+trace('Request to $host $port');
+		return  { str: buffer.toString(), bytes:buffer };
 		//throw "Unhandled data '"+msg+"'";
 	}
 	
-	private function handleConnection(c:Client, msg:Message):Void {
-		c.buffer.writeBytes(msg.bytes, 0, msg.bytes.length);
-
-		var buf = c.buffer.getBytes();
+	private function handleConnection(c:Client):Message {
+		var buf = expandAndCopy(c);
 		var protocol:Int = buf.get(0);
 
 		trace('Client Connect - Socks protocol v$protocol');
@@ -160,16 +188,27 @@ class NekoSocketServer extends ThreadServer<Client, Message>
 				c.socket.output.flush();
 				c.state = STATE.request;
 				if (buf.length > nMethods + 2) {
+					
 					var newChunk = buf.sub(nMethods + 2, buf.length - (nMethods + 2));
-					trace(newChunk.length);
+				
+					expandAndCopy(c, newChunk);
 					//handlemessage
-					return null;// { msg: { str: newChunk.toString(), bytes:newChunk }, bytes: newChunk.length };
-				}else {
+					return handleRequest(c);
 				}
+				return { str: buf.toString(), bytes:buf };
 			}
 		}
+		return null;
 		
 	}
+	
+	public function readUint16(buffer:Bytes, pos:Int):Int {
+		var bit3 = buffer.get(pos);
+		var bit2 = buffer.get(pos++);
+		
+		bit3 = bit3 << 8; 
+		return bit2 + bit3;
+	};
 
 	public override function addSocket( s : Socket ) {
 		//@see http://code.google.com/p/haxe/source/browse/trunk/std/neko/net/ServerLoop.hx?r=3351
